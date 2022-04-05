@@ -78,8 +78,8 @@ func getDafYomi() string {
 
 func main() {
 	dyTextStr := getDafYomi()
-	var subscriptionKey string = "e8e116026eb640fdb86d20c0ac1f319e"
-	var endpoint string = "https://dafyomisummary.cognitiveservices.azure.com"
+	var subscriptionKey string = "123"
+	var endpoint string = "https://abc.cognitiveservices.azure.com"
 
 	const uriPath = "/text/analytics/v3.2-preview.1/analyze"
 
