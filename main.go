@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+    	"github.com/dghubble/go-twitter/twitter"
+    	"github.com/dghubble/oauth1"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -11,6 +14,39 @@ import (
 	"time"
 )
 
+type Document struct {
+	Language string `json:"language"`
+	ID       int    `json:"id"`
+	Text     string `json:"text"`
+}
+
+type ExtractiveSummarizationTask struct {
+	Parameters map[string]interface{} `json:"parameters"`
+}
+
+type AnalysisInput struct {
+	Documents []Document `json:"documents"`
+}
+
+type Request struct {
+	Input AnalysisInput            `json:"analysisInput"`
+	Tasks map[string][]interface{} `json:"tasks"`
+}
+
+type Result struct {
+	Created time.Time      `json:"createdDateTime"`
+	Updated time.Time      `json:"lastUpdateDateTime"`
+	Errors  []interface{}  `json:"errors"`
+	Status  string         `json:"status"`
+	Tasks   map[string][]interface{} `json:"tasks"`
+}
+
+const (
+	subscriptionKey = "123"
+	endpoint        = "https://abc.cognitiveservices.azure.com"
+	uriPath         = "/text/analytics/v3.2-preview.1/analyze"
+	apiURL          = endpoint + uriPath
+)
 func getUrl() struct {
 	URL string "json:\"url\""
 } {
@@ -76,59 +112,158 @@ func getDafYomi() string {
 	return psukimStr
 }
 
-func main() {
-	dyTextStr := getDafYomi()
-	var subscriptionKey string = "123"
-	var endpoint string = "https://abc.cognitiveservices.azure.com"
+func getHttpClient() *http.Client {
+	return &http.Client{
+		Timeout: time.Second * 10,
+	}
+}
 
-	const uriPath = "/text/analytics/v3.2-preview.1/analyze"
+func makeHttpRequest(verb, url string, body interface{}) *http.Request {
+	var err error
+	var bodyAsJson []byte
 
-	var uri = endpoint + uriPath
+	if body != nil {
+		bodyAsJson, err = json.Marshal(body)
+		if err != nil {
+			log.Fatalln(err)
+		}
+	}
 
-	data := []map[string]string{
-		{"id": "1", "language": "en", "text": dyTextStr},
+	var httpRequest *http.Request
+	if body != nil {
+		httpRequest, err = http.NewRequest(verb, url, bytes.NewBuffer(bodyAsJson))
+	} else {
+		httpRequest, err = http.NewRequest(verb, url, nil)
 	}
-	params := []map[string]string{
-		{"model-version": "latest", "sentenceCount": "3", "sortBy": "Offset"},
-	}
-	documents, err := json.Marshal(&data)
-	if err != nil {
-		fmt.Printf("Error marshaling data: %v\n", err)
-		return
-	}
-	tasks, err := json.Marshal(&params)
-	if err != nil {
-		fmt.Printf("Error marshaling data: %v\n", err)
-		return
-	}
-	r := strings.NewReader("{\"tasks\":{\"extractiveSummarizationTasks\":{\"parameters\":" + string(tasks) + "}},\"analysisInput\":{\"documents\":" + string(documents) + "}}")
-	client := &http.Client{
-		Timeout: time.Second * 2,
-	}
-	req, err := http.NewRequest("POST", uri, r)
+
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
-		return
+		return nil
 	}
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Ocp-Apim-Subscription-Key", subscriptionKey)
-	resp, err := client.Do(req)
+
+	httpRequest.Header.Add("Content-Type", "application/json")
+	httpRequest.Header.Add("Ocp-Apim-Subscription-Key", subscriptionKey)
+
+	return httpRequest
+}
+
+func main() {
+	config := oauth1.NewConfig("123", "456")
+	token := oauth1.NewToken("789", "012")
+	twitterHTTPClient := config.Client(oauth1.NoContext, token)
+	twitterClient := twitter.NewClient(twitterHTTPClient)
+
+
+	input := Request{
+		Input: AnalysisInput{
+			Documents: []Document{
+				{
+					Language: "en",
+					ID:       1,
+					Text:     getDafYomi(),
+				},
+			},
+		},
+		Tasks: map[string][]interface{}{
+			"extractiveSummarizationTasks": {
+				ExtractiveSummarizationTask{
+					Parameters: map[string]interface{}{
+						"model-version": "latest",
+						"sentenceCount": 2,
+						"sortBy":        "Offset",
+					},
+				},
+			},
+		},
+	}
+
+	fmt.Printf("Issuing POST of analysis request to %s\n", apiURL)
+
+	request := makeHttpRequest("POST", apiURL, input)
+	httpClient := getHttpClient()
+	resp, err := httpClient.Do(request)
 	if err != nil {
 		fmt.Printf("Error on request: %v\n", err)
 		return
 	}
-	defer resp.Body.Close()
+
+	resultsUrl := resp.Header["Operation-Location"][0]
+	fmt.Printf("Request was successful. Got results URL back: %s\n", resultsUrl)
+
+	for {
+		request = makeHttpRequest("GET", resultsUrl, nil)
+		result := checkAnalysisTaskResults(resultsUrl)
+		finish := false
+
+		switch result.Status {
+		case "notStarted":
+			fmt.Println("Task hasn't started yet, sleeping...")
+			time.Sleep(time.Second * 5)
+			continue
+
+		case "running":
+			fmt.Println("Task is running...")
+			time.Sleep(time.Second * 5)
+			continue
+
+		case "succeeded":
+			fmt.Println("Task was successful")
+			extractiveSummarizationTasks := result.Tasks["extractiveSummarizationTasks"]
+			for _, value := range extractiveSummarizationTasks {
+				valueStr := fmt.Sprint(value)
+				re, _ := regexp.Compile("text:[^]]*.")
+				sentences := re.FindAllString(valueStr, 3)
+				for j, sentence := range sentences {
+					sentence = strings.ReplaceAll(sentence, "text:", "")
+					sentence = strings.ReplaceAll(sentence, "<b>", "")
+					sentence = strings.ReplaceAll(sentence, "</b>", "")
+					sentence = strings.ReplaceAll(sentence, "]", "")
+					sentences[j] = sentence
+				}
+				sentencesStr := strings.Join(sentences, " ")
+				fmt.Println(sentencesStr)
+				tweet, resp, err := twitterClient.Statuses.Update(sentencesStr, nil)
+				if err != nil {
+					fmt.Println(err)
+				}
+				fmt.Println(tweet)
+				fmt.Println(resp)
+			}
+			finish = true
+			break
+
+		default:
+			fmt.Printf("Unknown task status: %s\n", result.Status)
+			finish = true
+			break
+		}
+
+		if finish {
+			break
+		}
+	}
+
+	fmt.Println("Finished.")
+}
+
+func checkAnalysisTaskResults(url string) *Result {
+	fmt.Printf("issuing GET to results URL to fetch results: %s\n", url)
+
+	httpClient := getHttpClient()
+	resultsRequest := makeHttpRequest("GET", url, nil)
+	resp, err := httpClient.Do(resultsRequest)
+	if err != nil {
+		fmt.Println(err.Error())
+		return nil
+	}
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("Error reading response body: %v\n", err)
-		return
+		return nil
 	}
-	var f interface{}
-	json.Unmarshal(body, &f)
-	jsonFormatted, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		fmt.Printf("Error producing JSON: %v\n", err)
-		return
-	}
-	fmt.Println(string(jsonFormatted))
+
+	var r *Result
+	json.Unmarshal(body, &r)
+	return r
 }
